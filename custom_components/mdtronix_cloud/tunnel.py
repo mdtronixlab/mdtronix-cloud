@@ -46,7 +46,18 @@ HOP_BY_HOP = {
     "upgrade",
 }
 # Headers aiohttp sets itself, or that only apply to the tunnel's own WebSocket.
-REQUEST_DROP = HOP_BY_HOP | {"host", "content-length", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions"}
+REQUEST_DROP = HOP_BY_HOP | {
+    "host",
+    "content-length",
+    # Home Assistant may compress its response. The tunnel decodes it and forwards plain bytes, so the
+    # browser never depends on the encoding it asked for, which the relay can drop.
+    "accept-encoding",
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+}
+# Response headers that no longer describe the body once it has been decoded.
+RESPONSE_DROP = HOP_BY_HOP | {"content-encoding", "content-length"}
 
 
 class TunnelRevoked(Exception):
@@ -84,7 +95,7 @@ def _response_headers(headers: Any) -> dict[str, str | list[str]]:
     out: dict[str, str | list[str]] = {}
     for name in headers.keys():
         key = name.lower()
-        if key in HOP_BY_HOP:
+        if key in RESPONSE_DROP:
             continue
         values = headers.getall(name)
         out[key] = values[0] if len(values) == 1 else list(values)
@@ -304,7 +315,6 @@ class TunnelClient:
                 headers=_forward_request_headers(msg.get("headers", {})),
                 data=body,
                 allow_redirects=False,
-                auto_decompress=False,
                 timeout=aiohttp.ClientTimeout(total=None, sock_read=300),
             ) as resp:
                 await self._send_text(
