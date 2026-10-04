@@ -29,3 +29,7 @@ pytest tests/mdtronix_cloud/test_config_flow.py tests/mdtronix_cloud/test_proxy_
 ```
 
 Protocol and design: `docs/remote-access/PROTOCOL.md` and `docs/remote-access/PHASE0.md`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
