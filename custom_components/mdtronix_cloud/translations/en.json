@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Home Assistant to MDtronix",
+        "description": "1. Open {verification_uri}\n2. Sign in with Google and enter the code **{user_code}**.\n3. Come back here and select Submit."
+      },
+      "reauth_confirm": {
+        "title": "Connect again"
+      }
+    },
+    "error": {
+      "pending": "The code hasn't been approved yet. Approve it in your browser, then select Submit again.",
+      "cannot_connect": "Could not reach MDtronix. Check your internet connection and try again."
+    },
+    "abort": {
+      "already_linked": "This account already has a connected Home Assistant. Remove the other connection first, or link again with Replace in the browser.",
+      "account_suspended": "This account is suspended. Contact MDtronix support.",
+      "reauth_successful": "Re-linked.",
+      "reauth_failed": "The integration entry could not be found."
+    }
+  },
+  "issues": {
+    "loopback_trusted_network": {
+      "title": "Remote access may skip the password",
+      "description": "`trusted_networks` in your Home Assistant configuration includes 127.0.0.1. Remote visitors arrive from 127.0.0.1, so they may be treated as trusted and sign in without a password. Remove 127.0.0.1 from `trusted_networks`."
+    },
+    "trusted_proxies_missing": {
+      "title": "Remote access needs forwarded client addresses",
+      "description": "Remote visitors show as 127.0.0.1 in the Home Assistant logs. Add this to `configuration.yaml`, then restart:\n\n```yaml\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 127.0.0.1\n    - ::1\n```"
+    },
+    "remote_access_inactive": {
+      "title": "Remote access is not active",
+      "description": "This home is offline for remote access because its subscription is not active. Contact MDtronix to renew it. Home Assistant itself keeps working on your local network."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "remote_access": {
+        "name": "Remote access"
+      }
+    }
+  }
+}
