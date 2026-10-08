@@ -5,7 +5,10 @@
   "documentation": "https://github.com/mdtronixlab/mdtronix-cloud",
   "integration_type": "service",
   "iot_class": "cloud_push",
-  "requirements": [],
+  "single_config_entry": true,
+  "requirements": [
+    "PyTurboJPEG==1.8.3"
+  ],
   "version": "0.1.0",
   "issue_tracker": "https://github.com/mdtronixlab/mdtronix-cloud/issues"
 }

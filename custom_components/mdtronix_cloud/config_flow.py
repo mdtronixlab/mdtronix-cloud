@@ -1,23 +1,55 @@
 """Config flow: link this Home Assistant to a MDtronix account with a short code.
 
-The customer approves the code at RELAY_URL/link in a browser. HA never sees a password or a
-Google credential. Protocol: docs/remote-access/PROTOCOL.md, section 1.
+Setup opens the approval page in the user's browser on its own (Home Assistant's "external step"),
+and a background task polls the relay for approval, the same way the integration's own tunnel client
+would, but once per interval instead of once. Nothing in Home Assistant needs a click once the browser
+tab is open: approving the code there is enough to finish adding the integration. The customer never
+sees a password or a Google credential here. Protocol: docs/remote-access/PROTOCOL.md, section 1.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import aiohttp
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
-from .const import CONF_REMOTE_URL, CONF_SUBDOMAIN, CONF_TUNNEL_TOKEN, CONF_TUNNEL_URL, DOMAIN, RELAY_URL
+from .const import (
+    CONF_EXPOSED_ALEXA,
+    CONF_EXPOSED_GOOGLE,
+    CONF_REMOTE_URL,
+    CONF_SUBDOMAIN,
+    CONF_TUNNEL_TOKEN,
+    CONF_TUNNEL_URL,
+    CONF_VOICE_PIN,
+    DOMAIN,
+    RELAY_URL,
+)
+from .voice_config import VOICE_DOMAINS, exposed_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
 STEP_USER = "user"
+
+# Errors from /v1/ha/device/token (PROTOCOL.md 1.3) that stop polling, mapped to an abort reason.
+_ABORT_REASONS = {
+    "instance_already_linked": "already_linked",
+    "account_suspended": "account_suspended",
+    "expired_token": "timeout",
+}
 
 
 class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -25,18 +57,25 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> MDtronixCloudOptionsFlow:
+        return MDtronixCloudOptionsFlow()
+
     def __init__(self) -> None:
         self._device_code: str = ""
         self._user_code: str = ""
         self._verification_uri: str = ""
         self._interval: int = 5
+        self._expires_in: int = 900
         self._relink_entry_id: str | None = None
+        self._poll_task: asyncio.Task[None] | None = None
+        self._approved_body: dict[str, Any] | None = None
+        self._error: str | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Show the code first. When the customer submits, check whether it has been approved."""
-        if user_input is None:
-            return await self._start_device_login()
-        return await self._check_approval()
+        """Starts the device login. The only form here is a retry button, shown if the relay can't be reached."""
+        return await self._start_device_login()
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """The relay revoked this home's token, so link again."""
@@ -57,37 +96,86 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
         self._user_code = data["user_code"]
         self._verification_uri = data["verification_uri_complete"]
         self._interval = int(data.get("interval", 5))
-        return self._show_code_form()
+        self._expires_in = int(data.get("expires_in", 900))
+        self._approved_body = None
+        self._error = None
+        # eager_start=False: the task must not start until this step has returned and the flow manager has
+        # recorded it, not run inline here (a real sleep() yields first either way, but this doesn't rely on it).
+        self._poll_task = self.hass.async_create_task(
+            self._poll_for_approval(), f"{DOMAIN}_device_login_{self.flow_id}", eager_start=False
+        )
+        return self.async_external_step(
+            step_id="waiting",
+            url=self._verification_uri,
+            description_placeholders={
+                "user_code": self._user_code,
+                "verification_uri": self._verification_uri,
+            },
+        )
 
-    async def _check_approval(self) -> ConfigFlowResult:
+    async def _poll_for_approval(self) -> None:
+        """Polls the relay in the background until the code is approved, fails, or expires.
+
+        Nothing else advances the flow past its external step, so this drives it to completion itself
+        once it has an answer (see _drive_to_completion). That is how setup finishes without the owner
+        coming back to Home Assistant and clicking anything once they have approved the code.
+        """
         session = async_get_clientsession(self.hass)
+        deadline = self.hass.loop.time() + self._expires_in
+        interval = self._interval
+        while self.hass.loop.time() < deadline:
+            await asyncio.sleep(interval)
+            try:
+                async with session.post(
+                    f"{RELAY_URL}/v1/ha/device/token", json={"device_code": self._device_code}
+                ) as resp:
+                    body: dict[str, Any] = await resp.json(content_type=None)
+                    status = resp.status
+            except (aiohttp.ClientError, TimeoutError):
+                continue  # One dropped request is worth retrying; the deadline above still applies.
+
+            if status == 200:
+                self._approved_body = body
+                break
+            error = body.get("error", "unknown")
+            if error == "slow_down":
+                interval += 5
+                continue
+            if error == "authorization_pending":
+                continue
+            # expired_token, invalid_grant, instance_already_linked, account_suspended: stop polling.
+            self._error = error
+            break
+        else:
+            self._error = "expired_token"
+
+        await self._drive_to_completion()
+
+    async def _drive_to_completion(self) -> None:
+        """Advances the flow past its external step. The frontend reacts to the result; it doesn't
+        call back in on its own, so this keeps calling configure until the flow reaches a real step."""
         try:
-            async with session.post(
-                f"{RELAY_URL}/v1/ha/device/token", json={"device_code": self._device_code}
-            ) as resp:
-                body: dict[str, Any] = await resp.json(content_type=None)
-                status = resp.status
-        except (aiohttp.ClientError, TimeoutError):
-            return self._show_code_form(error="cannot_connect")
+            result = await self.hass.config_entries.flow.async_configure(self.flow_id)
+            while result["type"] is FlowResultType.EXTERNAL_STEP_DONE:
+                result = await self.hass.config_entries.flow.async_configure(self.flow_id)
+        except UnknownFlow:
+            pass  # The flow was cancelled (the dialog was closed); nothing left to advance.
 
-        if status == 200:
-            return await self._finish(body)
+    async def async_step_waiting(self, user_input: Any = None) -> ConfigFlowResult:
+        """Reached once polling has an answer. There is nothing to show here; it moves straight on."""
+        if self._approved_body is not None:
+            return self.async_external_step_done(next_step_id="finish")
+        if self._error is not None:
+            return self.async_external_step_done(next_step_id="failed")
+        # Not resolved yet. Re-show the same external step rather than erroring on a stray call.
+        return self.async_external_step(step_id="waiting", url=self._verification_uri)
 
-        error = body.get("error", "unknown")
-        if error == "authorization_pending":
-            return self._show_code_form(error="pending")
-        if error == "slow_down":
-            self._interval += 5
-            return self._show_code_form(error="pending")
-        if error in ("expired_token", "invalid_grant"):
-            # The code expired or was used. Start again with a fresh one.
-            return await self._start_device_login()
-        if error == "instance_already_linked":
-            return self.async_abort(reason="already_linked")
-        if error == "account_suspended":
-            return self.async_abort(reason="account_suspended")
-        _LOGGER.debug("device login failed with %s", error)
-        return self._show_code_form(error="cannot_connect")
+    async def async_step_finish(self, user_input: Any = None) -> ConfigFlowResult:
+        assert self._approved_body is not None
+        return await self._finish(self._approved_body)
+
+    async def async_step_failed(self, user_input: Any = None) -> ConfigFlowResult:
+        return self.async_abort(reason=_ABORT_REASONS.get(self._error or "", "cannot_connect"))
 
     async def _finish(self, body: dict[str, Any]) -> ConfigFlowResult:
         data = {
@@ -109,16 +197,53 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         return self.async_create_entry(title=body["remote_url"], data=data)
 
-    def _show_code_form(self, error: str | None = None) -> ConfigFlowResult:
-        return self.async_show_form(
-            step_id=STEP_USER,
-            data_schema=None,
-            description_placeholders={
-                "user_code": self._user_code,
-                "verification_uri": self._verification_uri,
-            },
-            errors={"base": error} if error else None,
-        )
-
     def _error_form(self, error: str) -> ConfigFlowResult:
         return self.async_show_form(step_id=STEP_USER, data_schema=None, errors={"base": error})
+
+    @callback
+    def async_remove(self) -> None:
+        """The flow was cancelled or finished. Stop polling the relay for a code nobody is waiting on."""
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+
+
+class MDtronixCloudOptionsFlow(OptionsFlow):
+    """Chooses which devices Google Home and Alexa can control, and the PIN for locks and alarms."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        entry = self.config_entry
+        if user_input is not None:
+            pin = user_input.get(CONF_VOICE_PIN)
+            if pin is None:
+                # The field was left out of the form, so keep the PIN that is already set.
+                pin = entry.options.get(CONF_VOICE_PIN, "")
+            pin = pin.strip()
+            if pin and not (pin.isdigit() and 4 <= len(pin) <= 8):
+                errors[CONF_VOICE_PIN] = "invalid_pin"
+            else:
+                return self.async_create_entry(
+                    data={
+                        CONF_EXPOSED_GOOGLE: list(user_input.get(CONF_EXPOSED_GOOGLE) or []),
+                        CONF_EXPOSED_ALEXA: list(user_input.get(CONF_EXPOSED_ALEXA) or []),
+                        CONF_VOICE_PIN: pin,
+                    }
+                )
+
+        devices = EntitySelector(EntitySelectorConfig(domain=list(VOICE_DOMAINS), multiple=True))
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_EXPOSED_GOOGLE,
+                    default=sorted(exposed_entity_ids(entry, "google")),
+                ): devices,
+                vol.Optional(
+                    CONF_EXPOSED_ALEXA,
+                    default=sorted(exposed_entity_ids(entry, "alexa")),
+                ): devices,
+                vol.Optional(CONF_VOICE_PIN): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

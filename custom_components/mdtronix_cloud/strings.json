@@ -3,21 +3,26 @@
     "step": {
       "user": {
         "title": "Connect Home Assistant to MDtronix",
-        "description": "1. Open {verification_uri}\n2. Sign in with Google and enter the code **{user_code}**.\n3. Come back here and select Submit."
+        "description": "Could not reach MDtronix. Check your internet connection and select Submit to try again."
+      },
+      "waiting": {
+        "title": "Finish in your browser",
+        "description": "A tab opened at {verification_uri}, with the code **{user_code}** already filled in. Sign in with Google and select Connect there. This page moves on by itself once you have."
       },
       "reauth_confirm": {
         "title": "Connect again"
       }
     },
     "error": {
-      "pending": "The code hasn't been approved yet. Approve it in your browser, then select Submit again.",
       "cannot_connect": "Could not reach MDtronix. Check your internet connection and try again."
     },
     "abort": {
       "already_linked": "This account already has a connected Home Assistant. Remove the other connection first, or link again with Replace in the browser.",
       "account_suspended": "This account is suspended. Contact MDtronix support.",
       "reauth_successful": "Re-linked.",
-      "reauth_failed": "The integration entry could not be found."
+      "reauth_failed": "The integration entry could not be found.",
+      "timeout": "The code expired after 15 minutes without being approved. Start again.",
+      "cannot_connect": "Could not reach MDtronix while waiting for approval. Check your internet connection and start again."
     }
   },
   "issues": {
@@ -39,6 +44,22 @@
       "remote_access": {
         "name": "Remote access"
       }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Voice assistants",
+        "description": "Choose the devices that Google Home and Alexa can control. Each platform has its own list, so a device can be on one, both, or neither. Nothing is exposed until you pick devices. Locks and alarm panels also need the PIN to unlock or disarm by voice.",
+        "data": {
+          "exposed_google": "Google Home devices",
+          "exposed_alexa": "Alexa devices",
+          "voice_pin": "PIN for locks and alarms (4 to 8 digits, or empty to turn it off)"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "Use 4 to 8 digits, or leave the field empty to turn the PIN off."
     }
   }
 }

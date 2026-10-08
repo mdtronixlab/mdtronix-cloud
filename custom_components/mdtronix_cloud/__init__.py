@@ -5,6 +5,8 @@ Protocol: docs/remote-access/PROTOCOL.md. The tunnel client is in tunnel.py.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 import aiohttp
@@ -14,9 +16,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import CONF_TUNNEL_TOKEN, CONF_TUNNEL_URL, DEFAULT_LOCAL_PORT, DOMAIN
+from .const import CONF_SUBDOMAIN, CONF_TUNNEL_TOKEN, CONF_TUNNEL_URL, DEFAULT_LOCAL_PORT, DOMAIN
 from .proxy_check import covers_loopback
 from .tunnel import TunnelClient
+from .voice import VoiceAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +47,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Start the tunnel for this home. It runs for as long as the entry is loaded."""
     # Cookies from HA's own responses must not end up in a shared jar, so use a dummy one.
     session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+    voice = VoiceAssistant(hass, entry, subdomain=entry.data[CONF_SUBDOMAIN])
+    await voice.async_initialize()
 
     async def on_revoked() -> None:
         # The relay revoked this token (unlinked, or replaced from another HA). Ask the user to link again.
@@ -68,11 +73,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         on_revoked=on_revoked,
         on_inactive=on_inactive,
         on_state_change=on_state_change,
+        on_voice=voice.handle,
     )
     _async_check_proxy_setup(hass)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (client, session)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_create_background_task(hass, client.run(), f"{DOMAIN}_tunnel_{entry.entry_id}")
+    tunnel_task = entry.async_create_background_task(hass, client.run(), f"{DOMAIN}_tunnel_{entry.entry_id}")
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (client, session, voice, tunnel_task)
     return True
 
 
@@ -80,9 +86,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop the tunnel and close its session."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    client, session = hass.data[DOMAIN].pop(entry.entry_id)
+    client, session, voice, tunnel_task = hass.data[DOMAIN].pop(entry.entry_id)
+    # Home Assistant also cancels this task on unload, but not synchronously with this function, so a
+    # connection attempt still in progress (e.g. a slow or blocked DNS/TCP handshake) could otherwise
+    # outlive it. Cancelling and awaiting it here means nothing from this entry is left running once
+    # this function returns, not even a connection attempt that client.close() can't interrupt because
+    # it hasn't produced a socket yet.
+    tunnel_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tunnel_task
     await client.close()
     await session.close()
+    voice.async_deinitialize()
     _set_issue(hass, ISSUE_INACTIVE, False, ir.IssueSeverity.WARNING)
     return True
 
