@@ -121,10 +121,13 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         body = {"payload": message}
         if event_id:
             body["requestId"] = event_id
+        _LOGGER.debug("Reporting state to Google Home: %s", message)
         try:
             async with session.post(f"{RELAY_URL}/v1/ha/google-report-state", json=body, headers=headers) as resp:
                 if resp.status >= 400:
                     _LOGGER.warning("Home Graph rejected a state report: %s %s", resp.status, await resp.text())
+                else:
+                    _LOGGER.debug("Home Graph accepted the state report: %s", resp.status)
                 return resp.status
         except Exception:  # noqa: BLE001 - any failure here means "couldn't report this time," not a crash;
             # this fires on every entity state change for every Google-exposed entity, so it must never let

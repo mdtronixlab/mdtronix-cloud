@@ -61,6 +61,8 @@ class VoiceAssistant:
             self._google.async_enable_report_state()
         except Exception:
             _LOGGER.warning("Could not enable proactive Google Home state reporting", exc_info=True)
+        else:
+            _LOGGER.debug("Enabled proactive Google Home state reporting")
 
     async def async_deinitialize(self) -> None:
         await self._alexa.async_disable_proactive_mode()
