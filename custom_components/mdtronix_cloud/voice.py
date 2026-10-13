@@ -54,8 +54,11 @@ class VoiceAssistant:
             _LOGGER.warning("Could not enable proactive Alexa state reporting", exc_info=True)
         # Same idea for Google: starts the state-change listener that drives async_report_state.
         # Google has no separate authorization step to wait for either.
+        # Despite the name, this is a synchronous method on HA core's AbstractConfig (confirmed live:
+        # awaiting it raised "TypeError: 'NoneType' object can't be awaited") — not a coroutine, so it
+        # isn't awaited, matching async_disable_report_state() below which was already correct.
         try:
-            await self._google.async_enable_report_state()
+            self._google.async_enable_report_state()
         except Exception:
             _LOGGER.warning("Could not enable proactive Google Home state reporting", exc_info=True)
 
