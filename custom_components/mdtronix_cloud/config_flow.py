@@ -99,8 +99,12 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                     json={"email": user_input[CONF_EMAIL], "password": user_input[CONF_PASSWORD], "replace": replace},
                 ) as resp:
                     status = resp.status
+                    # content_type=None accepts any content type, but a Cloudflare error page (a brief
+                    # outage, not the relay's own code) would still not be valid JSON — ValueError (which
+                    # json.JSONDecodeError is a subclass of) below catches that the same way a connection
+                    # failure is caught, instead of letting it crash this step.
                     body: dict[str, Any] = await resp.json(content_type=None)
-            except (aiohttp.ClientError, TimeoutError):
+            except (aiohttp.ClientError, TimeoutError, ValueError):
                 errors["base"] = "cannot_connect"
             else:
                 if status == 200:
@@ -113,6 +117,8 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                 elif error == "instance_already_linked":
                     errors["base"] = "instance_already_linked"
                     self._offer_replace = True
+                elif error == "rate_limited":
+                    errors["base"] = "rate_limited"
                 else:
                     errors["base"] = "cannot_connect"
             prefill = user_input
@@ -146,7 +152,12 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="reauth_successful")
 
         await self.async_set_unique_id(body["subdomain"])
-        self._abort_if_unique_id_configured()
+        # updates=data: if this subdomain already has a (non-reauth) entry — e.g. the owner ticked
+        # Replace to resolve an instance_already_linked conflict on the same HA instance that already
+        # held the old entry — save the freshly issued token into that existing entry before aborting,
+        # instead of discarding it. Without this, the old entry would keep pointing at the token the
+        # relay just revoked until the tunnel's own reconnect-with-reauth noticed and fixed it later.
+        self._abort_if_unique_id_configured(updates=data)
         return self.async_create_entry(title=body["remote_url"], data=data)
 
 

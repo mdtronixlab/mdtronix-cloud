@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 
 import aiohttp
 from homeassistant.components.alexa.config import AbstractConfig as AlexaAbstractConfig
@@ -30,7 +29,6 @@ from .const import (
     CONF_EXPOSED_GOOGLE,
     CONF_TUNNEL_TOKEN,
     CONF_VOICE_PIN,
-    HOMEGRAPH_REPORT_STATE_URL,
     RELAY_URL,
 )
 
@@ -70,8 +68,6 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         super().__init__(hass)
         self._entry = entry
         self._agent_user_id = agent_user_id
-        self._token: str | None = None
-        self._token_expires_at: float = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -109,52 +105,31 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
     def should_2fa(self, state: State) -> bool:
         return state.entity_id.partition(".")[0] in PIN_DOMAINS
 
-    async def _async_get_homegraph_token(self) -> str | None:
-        """A token for calling Google's Home Graph API directly (reportStateAndNotification), reused
-        while fresh. None if the relay isn't configured for it yet, or can't be reached.
+    async def async_report_state(self, message, agent_user_id, event_id=None):
+        """Reports state to Google's Home Graph through the relay, which makes the actual Home Graph
+        call itself rather than handing this integration a bearer token to use directly.
 
-        The project's service account credentials live on the relay, not here, so this asks the
-        relay for a token instead of holding the private key in this public HACS package. The relay
-        authenticates the request with the home's own tunnel token (the same one already used to
-        attach the tunnel) — the same pattern AlexaVoiceConfig.async_get_access_token uses, except
-        the token itself isn't scoped to this home: Google authorizes by project, not by customer.
+        That matters because Home Graph trusts whatever agentUserId is in the request, and a home's
+        agentUserId (its subdomain) isn't a secret — if this integration held the shared Home Graph
+        token directly, any one compromised or malicious home could forge a state report for a
+        *different* customer by just naming their agentUserId. Routing through the relay means
+        agentUserId always comes from the relay's own authenticated lookup of this home's tunnel
+        token, never from anything this integration sends.
         """
-        if self._token and self._token_expires_at - TOKEN_EXPIRY_SAFETY_MARGIN_S > time.time():
-            return self._token
-
         session = async_get_clientsession(self.hass)
         headers = {"authorization": f"Bearer {self._entry.data[CONF_TUNNEL_TOKEN]}"}
+        body = {"payload": message}
+        if event_id:
+            body["requestId"] = event_id
         try:
-            async with session.get(f"{RELAY_URL}/v1/ha/google-report-token", headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-        except aiohttp.ClientError:
-            return None
-
-        self._token = data["access_token"]
-        self._token_expires_at = time.time() + float(data.get("expires_in", 0))
-        return self._token
-
-    async def async_report_state(self, message, agent_user_id, event_id=None):
-        token = await self._async_get_homegraph_token()
-        if not token:
-            return None
-
-        body = {"requestId": event_id or uuid.uuid4().hex, "agentUserId": agent_user_id, "payload": message}
-        session = async_get_clientsession(self.hass)
-        try:
-            async with session.post(
-                HOMEGRAPH_REPORT_STATE_URL, json=body, headers={"authorization": f"Bearer {token}"}
-            ) as resp:
-                if resp.status == 401:
-                    # The cached token was rejected (e.g. revoked); drop it so the next report fetches fresh.
-                    self._token = None
-                elif resp.status >= 400:
+            async with session.post(f"{RELAY_URL}/v1/ha/google-report-state", json=body, headers=headers) as resp:
+                if resp.status >= 400:
                     _LOGGER.warning("Home Graph rejected a state report: %s %s", resp.status, await resp.text())
                 return resp.status
-        except aiohttp.ClientError:
-            _LOGGER.warning("Could not reach Google's Home Graph API to report state", exc_info=True)
+        except Exception:  # noqa: BLE001 - any failure here means "couldn't report this time," not a crash;
+            # this fires on every entity state change for every Google-exposed entity, so it must never let
+            # an unexpected response from the relay (or anything else) propagate as an uncaught exception.
+            _LOGGER.warning("Could not reach the relay to report state", exc_info=True)
             return None
 
     async def async_connect_agent_user(self, agent_user_id: str) -> None:
