@@ -52,9 +52,19 @@ class VoiceAssistant:
             await self._alexa.set_authorized(True)
         except Exception:
             _LOGGER.warning("Could not enable proactive Alexa state reporting", exc_info=True)
+        # Same idea for Google: starts the state-change listener that drives async_report_state.
+        # Google has no separate authorization step to wait for either.
+        try:
+            await self._google.async_enable_report_state()
+        except Exception:
+            _LOGGER.warning("Could not enable proactive Google Home state reporting", exc_info=True)
 
     async def async_deinitialize(self) -> None:
         await self._alexa.async_disable_proactive_mode()
+        try:
+            self._google.async_disable_report_state()
+        except Exception:
+            _LOGGER.warning("Could not disable proactive Google Home state reporting", exc_info=True)
         self._alexa.async_deinitialize()
 
     async def handle(self, platform: str, body: str) -> tuple[int, str]:

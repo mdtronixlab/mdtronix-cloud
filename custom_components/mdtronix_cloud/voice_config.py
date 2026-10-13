@@ -10,8 +10,11 @@ Read the owner's options on each call, so an options change applies without relo
 
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 
+import aiohttp
 from homeassistant.components.alexa.config import AbstractConfig as AlexaAbstractConfig
 from homeassistant.components.alexa.errors import NoTokenAvailable
 from homeassistant.components.google_assistant.const import DOMAIN_TO_GOOGLE_TYPES
@@ -27,8 +30,11 @@ from .const import (
     CONF_EXPOSED_GOOGLE,
     CONF_TUNNEL_TOKEN,
     CONF_VOICE_PIN,
+    HOMEGRAPH_REPORT_STATE_URL,
     RELAY_URL,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 # Refetch a bit before the token's real expiry, so a borrowed token never goes stale mid-request.
 TOKEN_EXPIRY_SAFETY_MARGIN_S = 60
@@ -64,6 +70,8 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         super().__init__(hass)
         self._entry = entry
         self._agent_user_id = agent_user_id
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -79,8 +87,9 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
 
     @property
     def should_report_state(self) -> bool:
-        # Google is answered on request. Proactive reports need Google's HomeGraph, which isn't set up yet.
-        return False
+        # Pushes state changes to Google's Home Graph as they happen, instead of only answering
+        # Google's own requests. See async_report_state for how the token is fetched and the call made.
+        return True
 
     def get_local_user_id(self, webhook_id: str) -> None:
         return None
@@ -100,8 +109,53 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
     def should_2fa(self, state: State) -> bool:
         return state.entity_id.partition(".")[0] in PIN_DOMAINS
 
+    async def _async_get_homegraph_token(self) -> str | None:
+        """A token for calling Google's Home Graph API directly (reportStateAndNotification), reused
+        while fresh. None if the relay isn't configured for it yet, or can't be reached.
+
+        The project's service account credentials live on the relay, not here, so this asks the
+        relay for a token instead of holding the private key in this public HACS package. The relay
+        authenticates the request with the home's own tunnel token (the same one already used to
+        attach the tunnel) — the same pattern AlexaVoiceConfig.async_get_access_token uses, except
+        the token itself isn't scoped to this home: Google authorizes by project, not by customer.
+        """
+        if self._token and self._token_expires_at - TOKEN_EXPIRY_SAFETY_MARGIN_S > time.time():
+            return self._token
+
+        session = async_get_clientsession(self.hass)
+        headers = {"authorization": f"Bearer {self._entry.data[CONF_TUNNEL_TOKEN]}"}
+        try:
+            async with session.get(f"{RELAY_URL}/v1/ha/google-report-token", headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        except aiohttp.ClientError:
+            return None
+
+        self._token = data["access_token"]
+        self._token_expires_at = time.time() + float(data.get("expires_in", 0))
+        return self._token
+
     async def async_report_state(self, message, agent_user_id, event_id=None):
-        return None
+        token = await self._async_get_homegraph_token()
+        if not token:
+            return None
+
+        body = {"requestId": event_id or uuid.uuid4().hex, "agentUserId": agent_user_id, "payload": message}
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.post(
+                HOMEGRAPH_REPORT_STATE_URL, json=body, headers={"authorization": f"Bearer {token}"}
+            ) as resp:
+                if resp.status == 401:
+                    # The cached token was rejected (e.g. revoked); drop it so the next report fetches fresh.
+                    self._token = None
+                elif resp.status >= 400:
+                    _LOGGER.warning("Home Graph rejected a state report: %s %s", resp.status, await resp.text())
+                return resp.status
+        except aiohttp.ClientError:
+            _LOGGER.warning("Could not reach Google's Home Graph API to report state", exc_info=True)
+            return None
 
     async def async_connect_agent_user(self, agent_user_id: str) -> None:
         # Google only asks for the agent user once it has synced, and it is always this home.

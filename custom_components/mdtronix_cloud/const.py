@@ -9,6 +9,10 @@ RELAY_URL = "https://relay.mdtronix.online"
 # Smart Home endpoint region. The relay hands out the access token; see voice_config.py.
 ALEXA_EVENT_GATEWAY = "https://api.eu.amazonalexa.com/v3/events"
 
+# Google Home Graph API for proactive state reporting (reportStateAndNotification). The relay hands out
+# the access token (one shared service-account token, not per-home); see voice_config.py.
+HOMEGRAPH_REPORT_STATE_URL = "https://homegraph.googleapis.com/v1/devices:reportStateAndNotification"
+
 CONF_TUNNEL_TOKEN = "tunnel_token"
 CONF_TUNNEL_URL = "tunnel_url"
 CONF_SUBDOMAIN = "subdomain"
