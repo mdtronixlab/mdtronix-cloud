@@ -97,7 +97,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await tunnel_task
     await client.close()
     await session.close()
-    voice.async_deinitialize()
+    await voice.async_deinitialize()
     _set_issue(hass, ISSUE_INACTIVE, False, ir.IssueSeverity.WARNING)
     return True
 

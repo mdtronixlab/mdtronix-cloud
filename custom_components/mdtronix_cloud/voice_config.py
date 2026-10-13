@@ -10,13 +10,28 @@ Read the owner's options on each call, so an options change applies without relo
 
 from __future__ import annotations
 
+import time
+
 from homeassistant.components.alexa.config import AbstractConfig as AlexaAbstractConfig
+from homeassistant.components.alexa.errors import NoTokenAvailable
 from homeassistant.components.google_assistant.const import DOMAIN_TO_GOOGLE_TYPES
 from homeassistant.components.google_assistant.helpers import AbstractConfig as GoogleAbstractConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_EXPOSED_ALEXA, CONF_EXPOSED_ENTITIES, CONF_EXPOSED_GOOGLE, CONF_VOICE_PIN
+from .const import (
+    ALEXA_EVENT_GATEWAY,
+    CONF_EXPOSED_ALEXA,
+    CONF_EXPOSED_ENTITIES,
+    CONF_EXPOSED_GOOGLE,
+    CONF_TUNNEL_TOKEN,
+    CONF_VOICE_PIN,
+    RELAY_URL,
+)
+
+# Refetch a bit before the token's real expiry, so a borrowed token never goes stale mid-request.
+TOKEN_EXPIRY_SAFETY_MARGIN_S = 60
 
 # Domains that can never be exposed. Camera streaming needs a cloud service that we don't provide, and
 # groups duplicate the entities inside them.
@@ -106,11 +121,18 @@ class AlexaVoiceConfig(AlexaAbstractConfig):
         super().__init__(hass)
         self._entry = entry
         self._user_identifier = user_identifier
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
 
     @property
-    def endpoint(self) -> None:
-        # Proactive state reports aren't sent yet, so there is no event gateway endpoint.
-        return None
+    def should_report_state(self) -> bool:
+        # Pushes ChangeReport events for exposed entities as they change, instead of only
+        # answering Alexa's own requests. See async_get_access_token for how the token is fetched.
+        return True
+
+    @property
+    def endpoint(self) -> str:
+        return ALEXA_EVENT_GATEWAY
 
     @property
     def locale(self) -> str:
@@ -122,9 +144,33 @@ class AlexaVoiceConfig(AlexaAbstractConfig):
     def should_expose(self, entity_id: str) -> bool:
         return entity_id in exposed_entity_ids(self._entry, "alexa")
 
-    async def async_get_access_token(self) -> None:
-        # Requests arrive through the relay, which has already checked the account.
-        return None
+    async def async_get_access_token(self) -> str:
+        """A token for calling Alexa's Event Gateway directly (ChangeReport), reused while fresh.
+
+        The skill's "Send Alexa Events" LWA credentials live on the relay, not here, so this asks
+        the relay for a token instead of holding the client secret in this public HACS package. The
+        relay authenticates the request with the home's own tunnel token (the same one already used
+        to attach the tunnel), so no new per-home secret is needed.
+        """
+        if self._token and self._token_expires_at - TOKEN_EXPIRY_SAFETY_MARGIN_S > time.time():
+            return self._token
+
+        session = async_get_clientsession(self.hass)
+        headers = {"authorization": f"Bearer {self._entry.data[CONF_TUNNEL_TOKEN]}"}
+        try:
+            async with session.get(f"{RELAY_URL}/v1/ha/alexa-report-token", headers=headers) as resp:
+                if resp.status != 200:
+                    raise NoTokenAvailable
+                data = await resp.json()
+        except Exception as err:
+            if isinstance(err, NoTokenAvailable):
+                raise
+            raise NoTokenAvailable from err
+
+        self._token = data["access_token"]
+        self._token_expires_at = time.time() + float(data.get("expires_in", 0))
+        return self._token
 
     def async_invalidate_access_token(self) -> None:
-        return None
+        self._token = None
+        self._token_expires_at = 0.0

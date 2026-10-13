@@ -7,6 +7,7 @@ Home Assistant's own Google and Alexa handlers answer them, configured by voice_
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -16,6 +17,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 
 from .voice_config import AlexaVoiceConfig, GoogleVoiceConfig, exposed_entity_ids, voice_pin
+
+_LOGGER = logging.getLogger(__name__)
 
 SOURCE = "mdtronix_cloud"
 GOOGLE_EXECUTE = "action.devices.EXECUTE"
@@ -39,8 +42,19 @@ class VoiceAssistant:
 
     async def async_initialize(self) -> None:
         await self._alexa.async_initialize()
+        # The relay has already checked this home's account by the time any request reaches here, so
+        # there is no separate Alexa-side grant to wait for. This turns on proactive state reporting
+        # (should_report_state is True), the same way Home Assistant core marks a skill authorized
+        # after it processes a real AcceptGrant directive. A failure here (e.g. the relay or Alexa's
+        # token endpoint is briefly unreachable) shouldn't block the tunnel itself from starting, since
+        # request-driven voice fulfillment doesn't depend on it; it just tries again on the next reload.
+        try:
+            await self._alexa.set_authorized(True)
+        except Exception:
+            _LOGGER.warning("Could not enable proactive Alexa state reporting", exc_info=True)
 
-    def async_deinitialize(self) -> None:
+    async def async_deinitialize(self) -> None:
+        await self._alexa.async_disable_proactive_mode()
         self._alexa.async_deinitialize()
 
     async def handle(self, platform: str, body: str) -> tuple[int, str]:

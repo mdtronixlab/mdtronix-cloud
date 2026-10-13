@@ -5,6 +5,10 @@ DOMAIN = "mdtronix_cloud"
 # Relay origin. Device login, the tunnel, and the /link page live here.
 RELAY_URL = "https://relay.mdtronix.online"
 
+# Alexa Event Gateway for proactive state reporting (ChangeReport), matching the skill's Europe/India
+# Smart Home endpoint region. The relay hands out the access token; see voice_config.py.
+ALEXA_EVENT_GATEWAY = "https://api.eu.amazonalexa.com/v3/events"
+
 CONF_TUNNEL_TOKEN = "tunnel_token"
 CONF_TUNNEL_URL = "tunnel_url"
 CONF_SUBDOMAIN = "subdomain"
