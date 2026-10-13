@@ -6,8 +6,8 @@ Remote access to your Home Assistant through the MDtronix relay, with no port fo
 
 1. In HACS, add this repository as a custom repository (category: Integration).
 2. Install **MDtronix Cloud**, then restart Home Assistant.
-3. Go to **Settings → Devices & services → Add integration → MDtronix Cloud**. A browser tab opens on its own, with the code already filled in.
-4. Sign in with Google and select Connect. Setup in Home Assistant finishes by itself once you have; there is nothing to click back here.
+3. Create an MDtronix Cloud account at [relay.mdtronix.online/register](https://relay.mdtronix.online/register), and wait for MDtronix to approve it.
+4. Go to **Settings → Devices & services → Add integration → MDtronix Cloud**, and sign in with that same email and password.
 
 ## What it provides
 

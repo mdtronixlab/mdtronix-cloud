@@ -3,26 +3,32 @@
     "step": {
       "user": {
         "title": "Connect Home Assistant to MDtronix",
-        "description": "Could not reach MDtronix. Check your internet connection and select Submit to try again."
-      },
-      "waiting": {
-        "title": "Finish in your browser",
-        "description": "A tab opened at {verification_uri}, with the code **{user_code}** already filled in. Sign in with Google and select Connect there. This page moves on by itself once you have."
+        "description": "Sign in with your MDtronix Cloud account. Don't have one? Create it at relay.mdtronix.online/register and wait for MDtronix to approve it, then come back here.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "replace": "Replace the Home Assistant already connected to this account"
+        }
       },
       "reauth_confirm": {
-        "title": "Connect again"
+        "title": "Connect again",
+        "description": "MDtronix needs you to sign in again to reconnect this Home Assistant.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
       }
     },
     "error": {
+      "invalid_credentials": "Incorrect email or password.",
+      "instance_already_linked": "This account already has a connected Home Assistant. Tick \"Replace\" to connect this one instead.",
       "cannot_connect": "Could not reach MDtronix. Check your internet connection and try again."
     },
     "abort": {
-      "already_linked": "This account already has a connected Home Assistant. Remove the other connection first, or link again with Replace in the browser.",
+      "not_approved": "This email isn't approved for MDtronix Cloud yet. Contact MDtronix to get access, then start again.",
       "account_suspended": "This account is suspended. Contact MDtronix support.",
       "reauth_successful": "Re-linked.",
-      "reauth_failed": "The integration entry could not be found.",
-      "timeout": "The code expired after 15 minutes without being approved. Start again.",
-      "cannot_connect": "Could not reach MDtronix while waiting for approval. Check your internet connection and start again."
+      "reauth_failed": "The integration entry could not be found."
     }
   },
   "issues": {

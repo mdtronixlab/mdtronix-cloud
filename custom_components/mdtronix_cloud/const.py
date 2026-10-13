@@ -2,7 +2,7 @@
 
 DOMAIN = "mdtronix_cloud"
 
-# Relay origin. Device login, the tunnel, and the /link page live here.
+# Relay origin. HA's own login (POST /v1/ha/login) and the tunnel live here.
 RELAY_URL = "https://relay.mdtronix.online"
 
 # Alexa Event Gateway for proactive state reporting (ChangeReport), matching the skill's Europe/India
