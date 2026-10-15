@@ -10,6 +10,7 @@ Read the owner's options on each call, so an options change applies without relo
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 
@@ -31,6 +32,7 @@ from .const import (
     CONF_VOICE_PIN,
     RELAY_URL,
 )
+from .google_compat import REPORT_RGB, LightColors, needs_cover_pin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +43,8 @@ TOKEN_EXPIRY_SAFETY_MARGIN_S = 60
 # groups duplicate the entities inside them.
 EXCLUDED_DOMAINS = frozenset({"camera", "group"})
 # Lock and alarm commands are only accepted with the PIN. Google's handler enforces it, and we require it
-# for all of them, so an unlock or disarm by voice never works without the owner's PIN.
+# for all of them, so an unlock or disarm by voice never works without the owner's PIN. Doors, garages,
+# gates and windows need it too (google_compat.py).
 PIN_DOMAINS = frozenset({"lock", "alarm_control_panel"})
 VOICE_DOMAINS = tuple(sorted(d for d in DOMAIN_TO_GOOGLE_TYPES if d not in EXCLUDED_DOMAINS))
 DEFAULT_LOCALE = "en-US"
@@ -68,6 +71,8 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         super().__init__(hass)
         self._entry = entry
         self._agent_user_id = agent_user_id
+        # Shared by Report State here and by the QUERY and EXECUTE answers in voice.py.
+        self.light_colors = LightColors()
 
     @property
     def enabled(self) -> bool:
@@ -103,7 +108,7 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         return entity_id in exposed_entity_ids(self._entry, "google")
 
     def should_2fa(self, state: State) -> bool:
-        return state.entity_id.partition(".")[0] in PIN_DOMAINS
+        return state.domain in PIN_DOMAINS or needs_cover_pin(state)
 
     async def async_report_state(self, message, agent_user_id, event_id=None):
         """Reports state to Google's Home Graph through the relay, which makes the actual Home Graph
@@ -116,6 +121,10 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
         agentUserId always comes from the relay's own authenticated lookup of this home's tunnel
         token, never from anything this integration sends.
         """
+        # A copy, because Home Assistant keeps these same dicts to compare against the next change.
+        message = copy.deepcopy(message)
+        for entity_id, states in (message.get("devices") or {}).get("states", {}).items():
+            self.light_colors.fix_states(self.hass.states.get(entity_id), states, REPORT_RGB)
         session = async_get_clientsession(self.hass)
         headers = {"authorization": f"Bearer {self._entry.data[CONF_TUNNEL_TOKEN]}"}
         body = {"payload": message}

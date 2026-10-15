@@ -14,7 +14,7 @@ Remote access to your Home Assistant through the MDtronix relay, with no port fo
 - A "Remote access" sensor that is on while the tunnel is connected.
 - A repair issue if your subscription is not active.
 - Repair issues if your network settings would let remote visitors skip the password or hide their real address.
-- Voice control with Google Home and Alexa for the devices you choose in the integration's options: lights, switches, fans, blinds, locks, thermostats, scenes, alarm panels, and more. Nothing is exposed until you choose it. Locks and alarms need a PIN, set in the options, to unlock or disarm by voice.
+- Voice control with Google Home and Alexa for the devices you choose in the integration's options: lights, switches, fans, blinds, locks, thermostats, scenes, alarm panels, and more. Nothing is exposed until you choose it. Locks and alarms need a PIN, set in the options, to unlock or disarm by voice. With Google Home, doors, garages, gates and windows need it to open or close.
 
 ## Requirements
 

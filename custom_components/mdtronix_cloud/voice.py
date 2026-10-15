@@ -16,6 +16,7 @@ from homeassistant.components.google_assistant import smart_home as google_smart
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 
+from .google_compat import QUERY_RGB, cover_pin_error
 from .voice_config import AlexaVoiceConfig, GoogleVoiceConfig, exposed_entity_ids, voice_pin
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 SOURCE = "mdtronix_cloud"
 GOOGLE_EXECUTE = "action.devices.EXECUTE"
 GOOGLE_QUERY = "action.devices.QUERY"
+GOOGLE_SYNC = "action.devices.SYNC"
 # Alexa's unlock has no PIN step, so it's refused. The lock still locks by voice.
 ALEXA_UNLOCK = ("Alexa.LockController", "Unlock")
 # Alexa asks for the alarm's PIN when disarming. Home Assistant passes that PIN to the alarm, which only
@@ -99,14 +101,19 @@ class VoiceAssistant:
 
         if intent == GOOGLE_EXECUTE:
             commands = []
+            pin = voice_pin(self._entry)
             for command in payload.get("commands") or []:
                 allowed = []
                 for device in command.get("devices") or []:
                     entity_id = str(device.get("id", ""))
-                    if entity_id in exposed:
-                        allowed.append(device)
-                    else:
+                    if entity_id not in exposed:
                         refused_commands.append({"ids": [entity_id], "status": "ERROR", "errorCode": "deviceNotFound"})
+                    elif error := cover_pin_error(
+                        self._hass.states.get(entity_id), command.get("execution") or [], pin
+                    ):
+                        refused_commands.append({"ids": [entity_id], "status": "ERROR", **error})
+                    else:
+                        allowed.append(device)
                 if allowed:
                     commands.append({**command, "devices": allowed})
             payload["commands"] = commands
@@ -129,11 +136,25 @@ class VoiceAssistant:
         # Google's handler returns nothing for some intents, such as DISCONNECT. Google still expects a body.
         reply = reply or {"requestId": request.get("requestId"), "payload": {}}
         body = reply.setdefault("payload", {})
+        self._fix_light_colors(intent, body)
         if refused_commands:
             body["commands"] = [*body.get("commands", []), *refused_commands]
         if refused_devices:
             body["devices"] = {**body.get("devices", {}), **refused_devices}
         return reply
+
+    def _fix_light_colors(self, intent: str | None, body: dict[str, Any]) -> None:
+        colors = self._google.light_colors
+        if intent == GOOGLE_SYNC:
+            colors.fix_sync(body.get("devices") or [])
+        elif intent == GOOGLE_QUERY:
+            for entity_id, states in (body.get("devices") or {}).items():
+                colors.fix_states(self._hass.states.get(entity_id), states, QUERY_RGB)
+        elif intent == GOOGLE_EXECUTE:
+            # Devices left in the same state share one result, so the first ID speaks for them all.
+            for result in body.get("commands") or []:
+                if (states := result.get("states")) and (ids := result.get("ids")):
+                    colors.fix_states(self._hass.states.get(ids[0]), states, QUERY_RGB)
 
     async def _alexa_reply(self, request: dict[str, Any]) -> dict[str, Any]:
         directive = request.get("directive") or {}
