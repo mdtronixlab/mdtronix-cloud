@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.components.alexa import smart_home as alexa_smart_home
 from homeassistant.components.google_assistant import smart_home as google_smart_home
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Context, HomeAssistant
+from homeassistant.core import Context, Event, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 
 from .google_compat import QUERY_RGB, cover_pin_error
 from .voice_config import AlexaVoiceConfig, GoogleVoiceConfig, exposed_entity_ids, voice_pin
@@ -41,6 +43,8 @@ class VoiceAssistant:
         self._subdomain = subdomain
         self._google = GoogleVoiceConfig(hass, entry, agent_user_id=subdomain)
         self._alexa = AlexaVoiceConfig(hass, entry, user_identifier=subdomain)
+        self._exposed_google: frozenset[str] = frozenset()
+        self._unsubscribe: list[Callable[[], None]] = []
 
     async def async_initialize(self) -> None:
         await self._alexa.async_initialize()
@@ -65,8 +69,29 @@ class VoiceAssistant:
             _LOGGER.warning("Could not enable proactive Google Home state reporting", exc_info=True)
         else:
             _LOGGER.debug("Enabled proactive Google Home state reporting")
+        # Ask Google to re-sync when the owner changes which devices it sees, or renames or removes one, so
+        # Google's device list follows without unlinking and linking again.
+        self._exposed_google = exposed_entity_ids(self._entry, "google")
+        self._unsubscribe = [
+            self._entry.add_update_listener(self._async_options_updated),
+            self._hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._async_entity_registry_updated),
+        ]
+
+    async def _async_options_updated(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        exposed = exposed_entity_ids(entry, "google")
+        if exposed != self._exposed_google:
+            self._exposed_google = exposed
+            self._google.async_schedule_google_sync_all()
+
+    @callback
+    def _async_entity_registry_updated(self, event: Event[er.EventEntityRegistryUpdatedData]) -> None:
+        changed = {event.data["entity_id"], event.data.get("old_entity_id")}
+        if changed & exposed_entity_ids(self._entry, "google"):
+            self._google.async_schedule_google_sync_all()
 
     async def async_deinitialize(self) -> None:
+        for unsubscribe in self._unsubscribe:
+            unsubscribe()
         await self._alexa.async_disable_proactive_mode()
         try:
             self._google.async_disable_report_state()

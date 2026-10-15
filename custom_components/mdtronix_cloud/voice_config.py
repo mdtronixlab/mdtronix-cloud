@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
+from http import HTTPStatus
 
 import aiohttp
 from homeassistant.components.alexa.config import AbstractConfig as AlexaAbstractConfig
@@ -143,6 +144,24 @@ class GoogleVoiceConfig(GoogleAbstractConfig):
             # an unexpected response from the relay (or anything else) propagate as an uncaught exception.
             _LOGGER.warning("Could not reach the relay to report state", exc_info=True)
             return None
+
+    async def _async_request_sync_devices(self, agent_user_id: str) -> int:
+        """Asks Google, through the relay, to send this home a fresh SYNC. Home Assistant calls this from
+        async_schedule_google_sync, after its own short debounce. As with Report State, the relay sets the
+        agentUserId from this home's tunnel token.
+        """
+        session = async_get_clientsession(self.hass)
+        headers = {"authorization": f"Bearer {self._entry.data[CONF_TUNNEL_TOKEN]}"}
+        try:
+            async with session.post(f"{RELAY_URL}/v1/ha/google-request-sync", headers=headers) as resp:
+                if resp.status >= 400:
+                    _LOGGER.warning("Google refused to re-sync devices: %s %s", resp.status, await resp.text())
+                else:
+                    _LOGGER.debug("Asked Google to re-sync devices: %s", resp.status)
+                return resp.status
+        except Exception:  # noqa: BLE001 - same reasoning as async_report_state: never let this crash a caller.
+            _LOGGER.warning("Could not reach the relay to re-sync devices with Google", exc_info=True)
+            return HTTPStatus.BAD_GATEWAY
 
     async def async_connect_agent_user(self, agent_user_id: str) -> None:
         # Google only asks for the agent user once it has synced, and it is always this home.
