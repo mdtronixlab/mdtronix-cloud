@@ -33,6 +33,20 @@ STABLE_AFTER_S = 300.0
 MAX_VOICE_REPLY_BYTES = 256 * 1024
 CAP_VOICE = "voice"
 
+# Cloudflare closes a WebSocket with 1009 when it receives a message over 32 MiB, and that can't be raised. One
+# proxied message crosses the tunnel as one binary frame, so a frame over this would drop the whole tunnel and every
+# stream on it, not just the stream that sent it. aiohttp's own default of 4 MiB is far too small for Home Assistant.
+CF_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+# The 4-byte stream id and the opcode byte in front of a proxied message.
+WS_FRAME_OVERHEAD = 5
+# The largest message Home Assistant may send through the tunnel, however high the relay sets its limit.
+MAX_WS_MESSAGE_CEILING = CF_MAX_MESSAGE_BYTES - WS_FRAME_OVERHEAD
+# Used when the relay doesn't state its limit in "ready". The relay's MAX_WS_MESSAGE_BYTES sets the real value.
+DEFAULT_WS_MESSAGE_BYTES = 24 * 1024 * 1024
+# Frames from the relay: the most a browser can send through Cloudflare, plus the overhead. aiohttp refuses a message
+# of exactly max_msg_size, hence the extra byte.
+MAX_TUNNEL_FRAME_BYTES = CF_MAX_MESSAGE_BYTES + WS_FRAME_OVERHEAD + 1
+
 # A voice handler takes (platform, JSON body) and returns (HTTP-style status, JSON body).
 VoiceHandler = Callable[[str, str], Awaitable[tuple[int, str]]]
 
@@ -76,6 +90,8 @@ class _Stream:
     ws: aiohttp.ClientWebSocketResponse | None = None
     task: asyncio.Task[None] | None = None
     handled: set[asyncio.Task[None]] = field(default_factory=set)
+    # Largest WebSocket message sent to Home Assistant, reported if it answers with 1009.
+    largest_sent: int = 0
 
 
 def encode_data(stream_id: int, payload: bytes) -> bytes:
@@ -85,6 +101,20 @@ def encode_data(stream_id: int, payload: bytes) -> bytes:
 def decode_data(frame: bytes) -> tuple[int, bytes]:
     (stream_id,) = struct.unpack(">I", frame[:4])
     return stream_id, frame[4:]
+
+
+def _ws_message_limit(advertised: Any) -> int:
+    """The relay's limit for one proxied message, never past what Cloudflare accepts. Older relays don't state one."""
+    if isinstance(advertised, int) and advertised > 0:
+        return min(advertised, MAX_WS_MESSAGE_CEILING)
+    return DEFAULT_WS_MESSAGE_BYTES
+
+
+def _wire_close_code(code: int) -> int:
+    """A close code that can be sent. 1005, 1006 and 1015 describe a close with no frame, so none can be put in one."""
+    if code == 1005:
+        return 1000
+    return 1011 if code in (1004, 1006, 1015) or not 1000 <= code <= 4999 else code
 
 
 def _forward_request_headers(headers: dict[str, Any]) -> dict[str, str | list[str]]:
@@ -138,6 +168,7 @@ class TunnelClient:
         self._ha: aiohttp.ClientWebSocketResponse | None = None
         self._streams: dict[int, _Stream] = {}
         self._voice_tasks: set[asyncio.Task[None]] = set()
+        self._ws_message_limit = DEFAULT_WS_MESSAGE_BYTES
         self._closing = False
         self._connected = asyncio.Event()
 
@@ -198,6 +229,7 @@ class TunnelClient:
                 headers={"Authorization": f"Bearer {self._token}", "X-MDT-Protocol": str(PROTOCOL_VERSION)},
                 heartbeat=None,
                 autoclose=False,
+                max_msg_size=MAX_TUNNEL_FRAME_BYTES,
             )
         except aiohttp.WSServerHandshakeError as err:
             if err.status == 401:
@@ -239,9 +271,18 @@ class TunnelClient:
             elif msg.type == aiohttp.WSMsgType.BINARY:
                 self._on_data(msg.data)
             elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
+                if msg.type == aiohttp.WSMsgType.CLOSE and msg.data == aiohttp.WSCloseCode.MESSAGE_TOO_BIG:
+                    _LOGGER.warning(
+                        "Tunnel closed with 1009 (hop: tunnel client to relay, limit %s bytes): %s",
+                        CF_MAX_MESSAGE_BYTES,
+                        msg.extra or "no reason given",
+                    )
                 return
             elif msg.type == aiohttp.WSMsgType.ERROR:
-                raise aiohttp.ClientError(str(ws.exception()))
+                if ws.close_code == aiohttp.WSCloseCode.MESSAGE_TOO_BIG:
+                    _LOGGER.warning("Tunnel closed with 1009 (hop: relay to tunnel client): %s", msg.data)
+                # msg.data, not ws.exception(): aiohttp leaves that empty for a protocol error like this one.
+                raise aiohttp.ClientError(str(msg.data))
 
     async def _send_text(self, obj: dict[str, Any]) -> None:
         if self._ha is not None and not self._ha.closed:
@@ -256,7 +297,10 @@ class TunnelClient:
     async def _on_control(self, msg: dict[str, Any]) -> None:
         kind = msg.get("t")
         if kind == "ready":
-            _LOGGER.debug("tunnel ready, max streams %s", msg.get("max_streams"))
+            self._ws_message_limit = _ws_message_limit(msg.get("max_ws_message_bytes"))
+            _LOGGER.debug(
+                "tunnel ready, max streams %s, max message %s bytes", msg.get("max_streams"), self._ws_message_limit
+            )
         elif kind == "ping":
             await self._send_text({"t": "pong"})
         elif kind == "pong":
@@ -274,7 +318,9 @@ class TunnelClient:
         elif kind == "ws_close":
             stream = self._streams.pop(msg["id"], None)
             if stream and stream.ws is not None and not stream.ws.closed:
-                await stream.ws.close(code=msg.get("code", 1000), message=msg.get("reason", "").encode())
+                await stream.ws.close(
+                    code=_wire_close_code(msg.get("code", 1000)), message=msg.get("reason", "").encode()
+                )
         elif kind == "reset":
             stream = self._streams.pop(msg["id"], None)
             if stream and stream.task:
@@ -292,6 +338,7 @@ class TunnelClient:
             return
         if stream.ws is not None and payload:
             opcode, data = payload[0], payload[1:]
+            stream.largest_sent = max(stream.largest_sent, len(data))
             if opcode == OP_TEXT:
                 asyncio.ensure_future(stream.ws.send_str(data.decode("utf-8", "replace")))
             elif opcode == OP_BINARY:
@@ -393,6 +440,7 @@ class TunnelClient:
                 headers=_forward_request_headers(msg.get("headers", {})),
                 heartbeat=None,
                 autoclose=False,
+                max_msg_size=self._ws_message_limit,
             )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             await self._send_text({"t": "reset", "id": stream_id, "reason": "local websocket failed"})
@@ -402,15 +450,19 @@ class TunnelClient:
         stream.ws = local
         await self._send_text({"t": "ws_accept", "id": stream_id, "protocol": local.protocol or ""})
         try:
-            async for item in local:
+            while True:
+                item = await local.receive()
                 if item.type == aiohttp.WSMsgType.TEXT:
                     await self._send_bytes(encode_data(stream_id, bytes([OP_TEXT]) + item.data.encode("utf-8")))
                 elif item.type == aiohttp.WSMsgType.BINARY:
                     await self._send_bytes(encode_data(stream_id, bytes([OP_BINARY]) + item.data))
                 else:
                     break
-            code = local.close_code or 1000
-            await self._send_text({"t": "ws_close", "id": stream_id, "code": code, "reason": ""})
+            code, reason = self._local_close_details(stream_id, stream, local, item)
+            if item.type == aiohttp.WSMsgType.CLOSE:
+                # autoclose is off, so Home Assistant is still waiting for this reply.
+                await local.close()
+            await self._send_text({"t": "ws_close", "id": stream_id, "code": code, "reason": reason})
         except asyncio.CancelledError:
             raise
         except (aiohttp.ClientError, OSError) as err:
@@ -418,6 +470,33 @@ class TunnelClient:
             await self._send_text({"t": "ws_close", "id": stream_id, "code": 1011, "reason": "local websocket failed"})
         finally:
             self._streams.pop(stream_id, None)
+
+    def _local_close_details(
+        self, stream_id: int, stream: _Stream, local: aiohttp.ClientWebSocketResponse, item: aiohttp.WSMessage
+    ) -> tuple[int, str]:
+        """The close code and reason to pass on when the socket to Home Assistant ends. Logs a 1009 with its hop."""
+        if item.type == aiohttp.WSMsgType.ERROR:
+            code = local.close_code or 1011
+            if code == aiohttp.WSCloseCode.MESSAGE_TOO_BIG:
+                # aiohttp's text holds the message's size and the limit, so the browser gets them as well as the log.
+                _LOGGER.warning(
+                    "WebSocket stream %s closed with 1009 (hop: Home Assistant to tunnel client, limit %s bytes): %s",
+                    stream_id,
+                    self._ws_message_limit,
+                    item.data,
+                )
+            return code, f"tunnel: {item.data}"[:120]
+        if item.type == aiohttp.WSMsgType.CLOSE:
+            if item.data == aiohttp.WSCloseCode.MESSAGE_TOO_BIG:
+                _LOGGER.warning(
+                    "WebSocket stream %s closed with 1009 (hop: tunnel client to Home Assistant, "
+                    "largest message sent %s bytes): %s",
+                    stream_id,
+                    stream.largest_sent,
+                    item.extra or "no reason given",
+                )
+            return item.data or 1000, item.extra or ""
+        return local.close_code or 1000, ""
 
 
 async def _body_from(first: bytes, queue: asyncio.Queue[bytes | None]) -> AsyncIterator[bytes]:
