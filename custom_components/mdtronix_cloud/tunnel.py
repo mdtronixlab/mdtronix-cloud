@@ -32,6 +32,8 @@ STABLE_AFTER_S = 300.0
 # Voice fulfillment (PROTOCOL.md section 2.5). Replies larger than this are refused by the relay too.
 MAX_VOICE_REPLY_BYTES = 256 * 1024
 CAP_VOICE = "voice"
+# Stated by the relay in "ready": it can pass on a body Home Assistant compressed without compressing it again.
+CAP_CONTENT_ENCODING = "content_encoding"
 
 # Cloudflare closes a WebSocket with 1009 when it receives a message over 32 MiB, and that can't be raised. One
 # proxied message crosses the tunnel as one binary frame, so a frame over this would drop the whole tunnel and every
@@ -69,8 +71,7 @@ HOP_BY_HOP = {
 REQUEST_DROP = HOP_BY_HOP | {
     "host",
     "content-length",
-    # Home Assistant may compress its response. The tunnel decodes it and forwards plain bytes, so the
-    # browser never depends on the encoding it asked for, which the relay can drop.
+    # The browser's value never reaches Home Assistant. _proxy_request picks the encoding itself.
     "accept-encoding",
     "sec-websocket-key",
     "sec-websocket-version",
@@ -78,6 +79,8 @@ REQUEST_DROP = HOP_BY_HOP | {
 }
 # Response headers that no longer describe the body once it has been decoded.
 RESPONSE_DROP = HOP_BY_HOP | {"content-encoding", "content-length"}
+# The same for a body passed on as Home Assistant compressed it. The relay streams it, so the length still goes.
+RESPONSE_DROP_ENCODED = HOP_BY_HOP | {"content-length"}
 
 
 class TunnelRevoked(Exception):
@@ -127,11 +130,16 @@ def _forward_request_headers(headers: dict[str, Any]) -> dict[str, str | list[st
     return out
 
 
-def _response_headers(headers: Any) -> dict[str, str | list[str]]:
+def _accepts_gzip(headers: dict[str, Any]) -> bool:
+    return "gzip" in str(headers.get("accept-encoding", "")).lower()
+
+
+def _response_headers(headers: Any, *, encoded: bool = False) -> dict[str, str | list[str]]:
+    drop = RESPONSE_DROP_ENCODED if encoded else RESPONSE_DROP
     out: dict[str, str | list[str]] = {}
     for name in headers.keys():
         key = name.lower()
-        if key in RESPONSE_DROP:
+        if key in drop:
             continue
         values = headers.getall(name)
         out[key] = values[0] if len(values) == 1 else list(values)
@@ -169,6 +177,7 @@ class TunnelClient:
         self._streams: dict[int, _Stream] = {}
         self._voice_tasks: set[asyncio.Task[None]] = set()
         self._ws_message_limit = DEFAULT_WS_MESSAGE_BYTES
+        self._relay_passes_encoding = False
         self._closing = False
         self._connected = asyncio.Event()
 
@@ -298,6 +307,7 @@ class TunnelClient:
         kind = msg.get("t")
         if kind == "ready":
             self._ws_message_limit = _ws_message_limit(msg.get("max_ws_message_bytes"))
+            self._relay_passes_encoding = CAP_CONTENT_ENCODING in (msg.get("caps") or [])
             _LOGGER.debug(
                 "tunnel ready, max streams %s, max message %s bytes", msg.get("max_streams"), self._ws_message_limit
             )
@@ -371,16 +381,30 @@ class TunnelClient:
             body = None if first is None else _body_from(first, stream.queue)
             query = msg.get("query") or ""
             url = f"{self._local_base}{msg['path']}" + (f"?{query}" if query else "")
+            headers = _forward_request_headers(msg.get("headers", {}))
+            # Home Assistant keeps its frontend gzipped. Passing those bytes on unchanged means the home's upload,
+            # usually the slowest link, carries about a quarter of the data. Only gzip, the one encoding every client
+            # takes, and Cloudflare converts it for any client that can't. Otherwise aiohttp's default applies and
+            # the body is decoded here, as it must be for a relay that doesn't state the capability.
+            keep_encoding = self._relay_passes_encoding and _accepts_gzip(msg.get("headers", {}))
+            if keep_encoding:
+                headers["accept-encoding"] = "gzip"
             async with self._session.request(
                 msg["method"],
                 url,
-                headers=_forward_request_headers(msg.get("headers", {})),
+                headers=headers,
                 data=body,
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=None, sock_read=300),
+                auto_decompress=not keep_encoding,
             ) as resp:
                 await self._send_text(
-                    {"t": "res", "id": stream_id, "status": resp.status, "headers": _response_headers(resp.headers)}
+                    {
+                        "t": "res",
+                        "id": stream_id,
+                        "status": resp.status,
+                        "headers": _response_headers(resp.headers, encoded=keep_encoding),
+                    }
                 )
                 async for chunk in resp.content.iter_chunked(RESPONSE_CHUNK):
                     await self._send_bytes(encode_data(stream_id, chunk))
