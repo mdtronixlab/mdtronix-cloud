@@ -56,11 +56,9 @@
   "options": {
     "step": {
       "init": {
-        "title": "Voice assistants",
-        "description": "Choose the devices that Google Home and Alexa can control. Each platform has its own list, so a device can be on one, both, or neither. Nothing is exposed until you pick devices. Locks and alarm panels need the PIN to unlock or disarm by voice, and doors, garages, gates and windows need it to open or close by voice with Google Home.",
+        "title": "Voice PIN",
+        "description": "Choose your devices on the [MDtronix Voice page](/mdtronix-voice) in the sidebar. Set the PIN here: locks and alarm panels need it to unlock or disarm by voice, and doors, garages, gates and windows need it to open or close by voice with Google Home.",
         "data": {
-          "exposed_google": "Google Home devices",
-          "exposed_alexa": "Alexa devices",
           "voice_pin": "PIN for locks, alarms, doors, garages, gates and windows (4 to 8 digits, or empty to turn it off)"
         }
       }

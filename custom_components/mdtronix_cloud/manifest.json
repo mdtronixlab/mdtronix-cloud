@@ -2,6 +2,12 @@
   "domain": "mdtronix_cloud",
   "name": "MDtronix Cloud",
   "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
   "documentation": "https://github.com/mdtronixlab/mdtronix-cloud",
   "integration_type": "service",
   "iot_class": "cloud_push",

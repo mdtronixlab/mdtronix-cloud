@@ -20,6 +20,7 @@ from .const import CONF_SUBDOMAIN, CONF_TUNNEL_TOKEN, CONF_TUNNEL_URL, DEFAULT_L
 from .proxy_check import covers_loopback
 from .tunnel import TunnelClient
 from .voice import VoiceAssistant
+from .voice_panel import async_register_voice_panel, async_remove_voice_panel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     tunnel_task = entry.async_create_background_task(hass, client.run(), f"{DOMAIN}_tunnel_{entry.entry_id}")
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (client, session, voice, tunnel_task)
+    await async_register_voice_panel(hass)
     return True
 
 
@@ -86,6 +88,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop the tunnel and close its session."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    async_remove_voice_panel(hass)
     client, session, voice, tunnel_task = hass.data[DOMAIN].pop(entry.entry_id)
     # Home Assistant also cancels this task on unload, but not synchronously with this function, so a
     # connection attempt still in progress (e.g. a slow or blocked DNS/TCP handshake) could otherwise

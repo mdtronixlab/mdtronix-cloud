@@ -13,7 +13,9 @@ from __future__ import annotations
 import copy
 import logging
 import time
+from collections.abc import Iterable
 from http import HTTPStatus
+from typing import Any
 
 import aiohttp
 from homeassistant.components.alexa.config import AbstractConfig as AlexaAbstractConfig
@@ -59,6 +61,16 @@ def exposed_entity_ids(entry: ConfigEntry, platform: str) -> frozenset[str]:
     key = CONF_EXPOSED_GOOGLE if platform == "google" else CONF_EXPOSED_ALEXA
     chosen = entry.options.get(key, entry.options.get(CONF_EXPOSED_ENTITIES, []))
     return frozenset(entity_id for entity_id in chosen if entity_id.partition(".")[0] not in EXCLUDED_DOMAINS)
+
+
+def options_with_exposure(
+    entry: ConfigEntry, platform: str, entity_ids: Iterable[str], expose: bool
+) -> dict[str, Any]:
+    """The entry's options with these devices added to one platform's list, or removed from it."""
+    chosen = set(exposed_entity_ids(entry, platform))
+    chosen = chosen | set(entity_ids) if expose else chosen - set(entity_ids)
+    key = CONF_EXPOSED_GOOGLE if platform == "google" else CONF_EXPOSED_ALEXA
+    return {**entry.options, key: sorted(chosen)}
 
 
 def voice_pin(entry: ConfigEntry) -> str | None:

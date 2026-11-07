@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -23,6 +24,7 @@ class RemoteAccessConnectedSensor(BinarySensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "remote_access"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False
 
     def __init__(self, entry: ConfigEntry) -> None:

@@ -13,7 +13,9 @@ from collections.abc import Callable
 from typing import Any
 
 from homeassistant.components.alexa import smart_home as alexa_smart_home
+from homeassistant.components.alexa.entities import async_get_entities as alexa_entities
 from homeassistant.components.google_assistant import smart_home as google_smart_home
+from homeassistant.components.google_assistant.helpers import async_get_entities as google_entities
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -98,6 +100,13 @@ class VoiceAssistant:
         except Exception:
             _LOGGER.warning("Could not disable proactive Google Home state reporting", exc_info=True)
         self._alexa.async_deinitialize()
+
+    def supported_entity_ids(self) -> dict[str, set[str]]:
+        """What each platform can control in this home, whether or not it's exposed yet."""
+        return {
+            "google": {entity.entity_id for entity in google_entities(self._hass, self._google)},
+            "alexa": {entity.entity_id for entity in alexa_entities(self._hass, self._alexa)},
+        }
 
     async def handle(self, platform: str, body: str) -> tuple[int, str]:
         """Answers one voice request with an HTTP-style status and a JSON body."""

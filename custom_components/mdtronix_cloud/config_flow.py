@@ -20,16 +20,12 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    EntitySelector,
-    EntitySelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
 )
 
 from .const import (
-    CONF_EXPOSED_ALEXA,
-    CONF_EXPOSED_GOOGLE,
     CONF_REMOTE_URL,
     CONF_SUBDOMAIN,
     CONF_TUNNEL_TOKEN,
@@ -38,7 +34,6 @@ from .const import (
     DOMAIN,
     RELAY_URL,
 )
-from .voice_config import VOICE_DOMAINS, exposed_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,7 +157,7 @@ class MDtronixCloudConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class MDtronixCloudOptionsFlow(OptionsFlow):
-    """Chooses which devices Google Home and Alexa can control, and the PIN for locks and alarms."""
+    """Sets the PIN for locks and alarms. The devices are chosen on the MDtronix Voice page (voice_panel.py)."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -176,25 +171,11 @@ class MDtronixCloudOptionsFlow(OptionsFlow):
             if pin and not (pin.isdigit() and 4 <= len(pin) <= 8):
                 errors[CONF_VOICE_PIN] = "invalid_pin"
             else:
-                return self.async_create_entry(
-                    data={
-                        CONF_EXPOSED_GOOGLE: list(user_input.get(CONF_EXPOSED_GOOGLE) or []),
-                        CONF_EXPOSED_ALEXA: list(user_input.get(CONF_EXPOSED_ALEXA) or []),
-                        CONF_VOICE_PIN: pin,
-                    }
-                )
+                # Saved options replace the old ones, so carry over the device lists.
+                return self.async_create_entry(data={**entry.options, CONF_VOICE_PIN: pin})
 
-        devices = EntitySelector(EntitySelectorConfig(domain=list(VOICE_DOMAINS), multiple=True))
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_EXPOSED_GOOGLE,
-                    default=sorted(exposed_entity_ids(entry, "google")),
-                ): devices,
-                vol.Optional(
-                    CONF_EXPOSED_ALEXA,
-                    default=sorted(exposed_entity_ids(entry, "alexa")),
-                ): devices,
                 vol.Optional(CONF_VOICE_PIN): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
