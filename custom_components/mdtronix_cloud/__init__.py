@@ -80,7 +80,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     tunnel_task = entry.async_create_background_task(hass, client.run(), f"{DOMAIN}_tunnel_{entry.entry_id}")
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (client, session, voice, tunnel_task)
-    await async_register_voice_panel(hass)
+    # A settings page must never cost the customer their remote access: this is the tunnel's setup too.
+    try:
+        await async_register_voice_panel(hass)
+    except Exception:
+        _LOGGER.exception("Could not add the MDtronix Voice page. Remote access and voice still work")
     return True
 
 

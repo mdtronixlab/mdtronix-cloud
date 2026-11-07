@@ -28,6 +28,7 @@ from custom_components.mdtronix_cloud.voice_panel import (
     device_rows,
 )
 from homeassistant.components.frontend import DATA_PANELS
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EntityCategory
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
@@ -272,6 +273,25 @@ async def test_page_goes_with_the_entry_and_comes_back_on_reload(hass, hass_ws_c
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     assert PANEL_URL_PATH in hass.data[DATA_PANELS]
+
+
+async def test_remote_access_survives_the_page_failing_to_load(hass, google_sync):
+    with patch(
+        "custom_components.mdtronix_cloud.async_register_voice_panel",
+        AsyncMock(side_effect=RuntimeError("the page broke")),
+    ):
+        entry = await _set_up(hass)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert PANEL_URL_PATH not in hass.data[DATA_PANELS]
+    client, _session, _voice, tunnel_task = hass.data[DOMAIN][entry.entry_id]
+    assert not tunnel_task.cancelled()
+    client.run.assert_called_once()
+
+    with patch(
+        "custom_components.mdtronix_cloud.voice_config.AlexaVoiceConfig.async_disable_proactive_mode", AsyncMock()
+    ):
+        assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_saving_the_pin_keeps_the_device_lists(hass, google_sync):
